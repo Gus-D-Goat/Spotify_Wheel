@@ -34,9 +34,12 @@ Panel {
   readonly property int artIntensity: Math.round(Math.max(0, Math.min(100, Number(setting("artIntensity", 55)))))
   readonly property string releaseGenre: String(setting("releaseGenre", "pop"))
   // Off by default: this starts a music player at login, which is a thing to
-  // opt into rather than to be handed. When it is on, the music is already up
-  // before the widget is touched, and the app's window has never been seen.
+  // opt into rather than to be handed. When it is on, ncspot is already up
+  // before the widget is touched, in its tmux session.
   readonly property bool startOnLogin: setting("startOnLogin", false) !== false
+  readonly property int autoQuitMinutes: Math.max(1, Math.round(Number(setting("autoQuitMinutes", 15))))
+  readonly property string tmuxSessionName: String(setting("tmuxSessionName", "ncspot")) || "ncspot"
+  readonly property string ncspotConfigPath: String(setting("ncspotConfigPath", "~/.config/ncspot/config.toml")) || "~/.config/ncspot/config.toml"
 
   // ------------------------------------------------------------------- theme
   readonly property color spotifyGreen: "#1DB954"
@@ -71,9 +74,17 @@ Panel {
 
   // ------------------------------------------------------------------ player
   readonly property var players: Mpris.players ? Mpris.players.values : []
-  readonly property var player: Model.findSpotify(players)
+  readonly property var player: Model.findNcspot(players)
   readonly property bool live: player !== null && player !== undefined
   readonly property bool playing: live && player.isPlaying === true
+
+  // --------------------------------------------------------- startup checks
+  property bool ncspotInstalled: true
+  property bool tmuxInstalled: true
+  property bool ncspotConfigExists: true
+
+  // ------------------------------------------------------------- auto-quit
+  property bool autoQuitPending: false
 
   readonly property string trackTitle: live ? String(player.trackTitle || "") : ""
   readonly property string trackArtist: live ? String(player.trackArtist || "") : ""
@@ -156,7 +167,7 @@ Panel {
   onArtUrlChanged: artProbeDelay.restart()
   onArtWantedChanged: if (artWanted) probeArt(false)
   // The music starts without being asked for, and without the app's window
-  // ever being on screen. The delay is for the session, not for Spotify: right
+  // ever being on screen. The delay is for the session, not for ncspot: right
   // at login the desktop is still busy and a launch would either lose the race
   // with something else starting or land its window somewhere visible.
   Timer {
@@ -164,13 +175,33 @@ Panel {
     interval: 6000
     onTriggered: {
       if (root.live) return
-      root.startInBackground(true)
+      root.launch()
     }
   }
 
   Component.onCompleted: {
     probeArt(false)
+    checkInstall()
     if (startOnLogin) autostartDelay.restart()
+  }
+
+  Process {
+    id: installCheckProc
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var text = String(raw)
+        root.ncspotInstalled = text.indexOf("NCSPOT yes") !== -1
+        root.tmuxInstalled = text.indexOf("TMUX yes") !== -1
+        root.ncspotConfigExists = text.indexOf("CONFIG yes") !== -1
+      }
+    }
+  }
+
+  function checkInstall() {
+    if (installCheckProc.running) installCheckProc.running = false
+    installCheckProc.command = ["/bin/sh", "-c", Model.installCheckScript(root.ncspotConfigPath)]
+    installCheckProc.running = true
   }
 
   function probeArt(force) {
@@ -453,7 +484,7 @@ Panel {
   // something useful while it waits rather than sit blank. A dimmed glyph and
   // a "Search or press to open" label is enough to read at a glance, and the
   // whole bar entry is still the way in.
-  readonly property string idleLabel: "Spotify"
+  readonly property string idleLabel: "ncspot"
   readonly property string idleHint: "Press for search"
 
   // ------------------------------------------------------------------ actions
@@ -471,30 +502,20 @@ Panel {
   // button. The window still exists and Hyprland still lists it, so a
   // deliberate `omarchy launch spotify` from anywhere else brings it back.
   function launch() {
-    startInBackground(true)
-  }
-
-  // The same thing without launching, for a window that is already open.
-  function minimizeToBackground() {
-    startInBackground(false)
-  }
-
-  function startInBackground(launchToo) {
     if (opsProc.running) opsProc.running = false
-    opsProc.command = ["/bin/sh", "-c", Model.spotifyBackgroundScript(launchToo)]
+    opsProc.command = ["/bin/sh", "-c", Model.ncspotStartScript(root.tmuxSessionName)]
     opsProc.running = true
   }
 
-  // The way back to the app. This is the only thing in the widget that brings
-  // the window on screen, which is what makes "Start hides it" a real promise
-  // rather than a setting that is on for a moment.
-  //
-  // It is not MPRIS: a window on a hidden workspace is not focused, so asking
-  // the player to raise it would quietly do nothing. The window has to be moved
-  // back onto the workspace the user is actually on.
+  function minimizeToBackground() {
+    if (opsProc.running) opsProc.running = false
+    opsProc.command = ["/bin/sh", "-c", Model.ncspotMinimizeScript(root.tmuxSessionName)]
+    opsProc.running = true
+  }
+
   function raise() {
     if (opsProc.running) opsProc.running = false
-    opsProc.command = ["/bin/sh", "-c", Model.spotifyShowScript()]
+    opsProc.command = ["/bin/sh", "-c", Model.ncspotShowScript(root.tmuxSessionName)]
     opsProc.running = true
   }
 
@@ -869,6 +890,32 @@ Panel {
     onTriggered: if (root.player) root.player.positionChanged()
   }
 
+  // Auto-quit: when playback pauses for autoQuitMinutes, gracefully quit
+  // ncspot and kill its tmux session to save battery.
+  Timer {
+    id: autoQuitTimer
+    interval: root.autoQuitMinutes * 60 * 1000
+    repeat: false
+    onTriggered: {
+      root.autoQuitPending = false
+      if (!root.live) return
+      root.quitApp()
+      if (opsProc.running) opsProc.running = false
+      opsProc.command = ["/bin/sh", "-c", Model.ncspotKillScript(root.tmuxSessionName)]
+      opsProc.running = true
+    }
+  }
+
+  onPlayingChanged: {
+    if (!root.playing && root.live) {
+      autoQuitTimer.restart()
+      root.autoQuitPending = true
+    } else {
+      autoQuitTimer.stop()
+      root.autoQuitPending = false
+    }
+  }
+
   // ------------------------------------------------------------------ popup
   PopupCard {
     id: popup
@@ -987,6 +1034,21 @@ Panel {
       id: column
       anchors.fill: parent
       spacing: Style.space(12)
+
+      Text {
+        width: parent.width
+        text: !root.ncspotInstalled
+          ? "ncspot is not installed"
+          : !root.tmuxInstalled
+            ? "tmux is not installed"
+            : !root.ncspotConfigExists
+              ? "ncspot config not found at " + root.ncspotConfigPath
+              : ""
+        color: root.accentColor
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
+        visible: text !== ""
+      }
 
       // Three views in one card. A tab strip rather than a longer panel,
       // because the three have almost nothing in common and stacking them
@@ -1225,7 +1287,6 @@ Panel {
           knobColor: root.accentColor
           onMoved: function(value) { if (root.live) root.player.volume = value }
         }
-      }
       }
 
       // ---------------------------------------------------------- discovery
@@ -1484,16 +1545,6 @@ Panel {
         width: parent.width
         spacing: Style.space(4)
 
-        // The one button that matters, and it points both ways. "Start" puts
-        // Spotify on a special workspace so the widget becomes the whole
-        // player: the client runs and plays, the window is somewhere you cannot
-        // land on it. That is the free-account version of headless -- spotifyd
-        // needs Premium, and there is no way to unmap the window without
-        // stopping it.
-        //
-        // "Show app" is the deliberate way back, for the times you do want to
-        // look at Spotify. It is the only thing here that brings the window on
-        // screen.
         Button {
           width: (parent.width - Style.space(4)) / 2
           text: root.live ? "Show app" : "Start"
@@ -1501,8 +1552,8 @@ Panel {
           accent: root.accentColor
           bordered: true
           tooltipText: root.live
-            ? "Bring the Spotify window back on screen"
-            : "Start playing in the background, with no window"
+            ? "Attach to the ncspot tmux session"
+            : "Start ncspot in a background tmux session"
           onClicked: {
             if (root.live) root.raise()
             else root.launch()
@@ -1510,9 +1561,6 @@ Panel {
           }
         }
 
-        // Stops playback, and closes Spotify with it. Deliberately unlike "Start":
-        // that one keeps playing with the window out of sight, and this is the
-        // way to actually be finished.
         Button {
           width: (parent.width - Style.space(4)) / 2
           text: "Close app"
@@ -1522,10 +1570,10 @@ Panel {
           bordered: true
           enabled: root.live && root.player.canQuit
           tooltipText: !root.live
-            ? "Spotify is not running"
+            ? "ncspot is not running"
             : !root.player.canQuit
-              ? "Spotify will not accept a quit request"
-              : "Quit Spotify and stop playing"
+              ? "ncspot will not accept a quit request"
+              : "Quit ncspot and stop playing"
           onClicked: {
             root.quitApp()
             root.close()
@@ -1533,6 +1581,7 @@ Panel {
         }
       }
     }
+  }
   }
 
   IpcHandler {
@@ -1551,6 +1600,7 @@ Panel {
     function show(): void { root.raise() }
     function quit(): string { return root.quitApp() ? "ok" : "unhandled" }
     function status(): string { return root.statusJson() }
+    function checkInstall(): void { root.checkInstall() }
 
     // The new views, so the same thing is reachable from a binding.
     function search(query: string): string { root.searchQuery = query; root.tab = 1; root.runSearch(); return "ok" }

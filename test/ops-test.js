@@ -1,6 +1,5 @@
-// Tests for the things the widget does to Spotify itself: starting it with no
-// window in the way, and putting an already-open window on a hidden workspace
-// so it keeps playing: `node test/ops-test.js`.
+// Tests for the things the widget does to ncspot itself: starting it in tmux,
+// attaching, detaching, and killing the session: `node test/ops-test.js`.
 
 const assert = require("assert")
 const fs = require("fs")
@@ -8,203 +7,83 @@ const path = require("path")
 const { execFileSync } = require("child_process")
 const M = require("../Model.js")
 
-// ------------------------------------------------------- starting in background
-//
-// The widget is meant to be the whole player: audio up, the app never opened.
-// On a free account that means putting Spotify's window on a special workspace
-// it cannot be landed on, so the launch and the hide have to be one script --
-// at the moment of launching there is no window yet, and a caller that looked
-// immediately would find nothing and give up.
+// ------------------------------------------------------- starting in tmux
 {
-  const hide = M.spotifyBackgroundScript(false)
-  const start = M.spotifyBackgroundScript(true)
-  const show = M.spotifyShowScript()
+  const start = M.ncspotStartScript("ncspot")
+  const show = M.ncspotShowScript("ncspot")
+  const minimize = M.ncspotMinimizeScript("ncspot")
+  const kill = M.ncspotKillScript("ncspot")
 
   // A shell script explains itself in comments, and the explanations here
   // necessarily quote the syntax they are warning against -- so assertions about
   // what the script *does* have to be made against the code, not the prose.
   const code = (s) => s.split("\n").filter((l) => !/^\s*#/.test(l)).join("\n")
 
-  for (const script of [hide, start, show]) {
-    assert.ok(script.indexOf("hyprctl clients -j") !== -1)
-    assert.ok(script.indexOf("command -v hyprctl") !== -1)
-    assert.ok(script.indexOf("command -v jq") !== -1)
-    // The address reaches a Lua string literal, so it is checked against what
-    // Hyprland emits before it is used for anything.
-    assert.ok(script.indexOf("0x*[0-9a-fA-F]*") !== -1)
-    assert.ok(script.indexOf("*[!0-9a-fA-Fx]*") !== -1)
+  // Start: checks for tmux and ncspot, creates detached session
+  for (const script of [start]) {
+    assert.ok(script.indexOf("command -v tmux") !== -1)
+    assert.ok(script.indexOf("command -v ncspot") !== -1)
+    assert.ok(code(script).indexOf("tmux new-session -d -s ncspot ncspot") !== -1)
+    assert.ok(code(script).indexOf("tmux has-session -t ncspot") !== -1)
   }
 
-  // Hyprland 0.55 moved dispatchers behind Lua. The old string form is a silent
-  // no-op on 0.56, so this is exactly the thing that has to be right.
-  for (const script of [hide, start]) {
-    assert.ok(code(script).indexOf("hl.dsp.window.move") !== -1,
-      "must use the Lua dispatcher form")
-    assert.ok(code(script).indexOf("address:$addr") !== -1,
-      "the window needs an address: selector")
-    assert.ok(code(script).indexOf("follow = false") !== -1,
-      "follow = true would pull the user onto the window being hidden")
-    assert.equal(code(script).indexOf("hyprctl dispatch movetoworkspace"), -1,
-      "the pre-0.55 string dispatcher is a no-op here")
+  // Show: attaches in terminal
+  assert.ok(code(show).indexOf("tmux attach -t ncspot") !== -1)
+  assert.ok(code(show).indexOf("foot") !== -1)
+
+  // Minimize: detaches
+  assert.ok(code(minimize).indexOf("tmux detach-client -t ncspot") !== -1)
+
+  // Kill: kills session
+  assert.ok(code(kill).indexOf("tmux kill-session -t ncspot") !== -1)
+
+  // No Spotify references remain
+  for (const script of [start, show, minimize, kill]) {
+    assert.ok(script.toLowerCase().indexOf("spotify") === -1, "script should not reference Spotify")
+    assert.ok(script.indexOf("hyprctl") === -1, "script should not reference hyprctl")
+    assert.ok(script.indexOf("special:") === -1, "script should not reference special workspaces")
+    assert.ok(script.indexOf("omarchy launch") === -1, "script should not use omarchy launch")
   }
 
-  // Our own scratchpad, not the conventional "minimized", so that toggling it
-  // can never disturb one the user has bound themselves.
-  assert.ok(code(hide).indexOf(M.hiddenWorkspace) !== -1)
-  assert.equal(M.hiddenWorkspace, "special:spotify")
-  assert.equal(code(hide).indexOf("special:minimized"), -1)
-
-  // Only the launch variant launches, detached so that stopping the script does
-  // not take the music with it.
-  assert.ok(start.indexOf("omarchy launch spotify") !== -1)
-  assert.ok(start.indexOf("setsid") !== -1)
-  assert.equal(hide.indexOf("omarchy launch spotify"), -1)
-
-  // Showing goes the other way, to wherever the user is.
-  assert.ok(code(show).indexOf("activeworkspace") !== -1)
-  assert.ok(code(show).indexOf("follow = true") !== -1)
-  assert.equal(show.indexOf("setsid"), -1)
-
-  // A no-op when nothing is open, and valid shell.
-  const quiet = execFileSync("/bin/sh", ["-c", hide], {
-    encoding: "utf8", timeout: 20000, stdio: ["ignore", "pipe", "pipe"]
-  })
-  assert.equal(quiet.trim(), "")
-
-  // ------------------------------------------------------------- with a window
-  //
-  // Real hyprctl, real jq, and a fake that reports a Spotify window on a
-  // workspace that the fake also records. The fake applies the move itself, so
-  // a dispatch that is syntactically accepted but does nothing still fails the
-  // script's own confirmation step -- which is the failure this is here for.
-  const box = fs.mkdtempSync("/tmp/spoty-bg-")
-  const bin = path.join(box, "bin")
-  fs.mkdirSync(bin)
-  const state = path.join(box, "ws")
-  const calls = path.join(box, "calls")
-
-  // The fake is stateful: `clients` reports whatever workspace is in the state
-  // file, so a dispatch that is accepted but does nothing leaves the script's
-  // own confirmation step to notice.
-  fs.writeFileSync(path.join(bin, "hyprctl"), `#!/bin/sh
-ws=$(cat ${JSON.stringify(state)} 2>/dev/null || echo 1)
-case "$1" in
-  clients)
-    case "$ws" in
-      special:*) echo '[{"class":"Spotify","title":"Spotify Free","workspace":{"id":-97,"name":"special:spotify"},"address":"0xabc"}]' ;;
-      *)         echo '[{"class":"Spotify","title":"Spotify Free","workspace":{"id":1,"name":"1"},"address":"0xabc"}]' ;;
-    esac ;;
-  activeworkspace) echo '{"id":1,"name":"1"}' ;;
-  dispatch)
-    echo "dispatch $*" >> ${JSON.stringify(calls)}
-    case "$*" in
-      *"special:spotify"*) echo "special:spotify" > ${JSON.stringify(state)} ;;
-      *"workspace = 1"*)    echo "1" > ${JSON.stringify(state)} ;;
-    esac ;;
-esac
-`)
-
-  // The real jq, so the selection query is genuinely exercised.
-  fs.symlinkSync("/usr/bin/jq", path.join(bin, "jq"))
-  fs.writeFileSync(path.join(bin, "omarchy"), `#!/bin/sh
-echo "omarchy $*" >> ${JSON.stringify(calls)}
-`)
-  for (const f of ["hyprctl", "omarchy"]) fs.chmodSync(path.join(bin, f), 0o755)
-
-  const env = { ...process.env, PATH: bin + ":" + process.env.PATH }
-
-  // ---- hide
-  fs.writeFileSync(state, "1")
-  const r1 = execFileSync("/bin/sh", ["-c", hide], {
-    encoding: "utf8", timeout: 30000, env, stdio: ["ignore", "pipe", "pipe"]
-  })
-  assert.equal(r1.trim(), "")
-  const seen1 = fs.readFileSync(calls, "utf8")
-  assert.ok(seen1.includes("hl.dsp.window.move"), "should have dispatched: " + seen1)
-  assert.ok(seen1.includes('address:0xabc'), "should have used an address: selector")
-  assert.ok(seen1.includes("special:spotify"), "should have asked for our scratchpad")
-  assert.equal(fs.readFileSync(state, "utf8").trim(), "special:spotify", "window should be hidden")
-
-  // ---- launch as well
-  fs.appendFileSync(calls, "")
-  const r2 = execFileSync("/bin/sh", ["-c", start], {
-    encoding: "utf8", timeout: 30000, env, stdio: ["ignore", "pipe", "pipe"]
-  })
-  assert.equal(r2.trim(), "")
-  const seen2 = fs.readFileSync(calls, "utf8")
-  assert.ok(seen2.includes("omarchy launch spotify"), "should have launched Spotify")
-
-  // ---- show
-  fs.writeFileSync(path.join(bin, "hyprctl"), `#!/bin/sh
-case "$1" in
-  clients)  echo '[{"class":"Spotify","title":"x","workspace":{"id":-97,"name":"special:spotify"},"address":"0xabc"}]' ;;
-  activeworkspace) echo '{"id":1,"name":"1"}' ;;
-  dispatch) echo "dispatch $*" >> ${JSON.stringify(calls)}
-            case "$*" in
-              *"workspace = 1"*) echo "1" > ${JSON.stringify(state)} ;;
-            esac ;;
-esac
-`)
-  fs.chmodSync(path.join(bin, "hyprctl"), 0o755)
-  fs.appendFileSync(calls, "")
-
-  const r3 = execFileSync("/bin/sh", ["-c", show], {
-    encoding: "utf8", timeout: 30000, env, stdio: ["ignore", "pipe", "pipe"]
-  })
-  assert.equal(r3.trim(), "")
-  const seen3 = fs.readFileSync(calls, "utf8")
-  assert.ok(seen3.includes("workspace = 1"), "should have moved to the current workspace: " + seen3)
-  assert.ok(seen3.includes("follow = true"), "should have followed the window there")
-
-  // ------------------------------------------- a dispatch that does nothing
-  //
-  // This is the one that would have shipped: the old script exited 0 the moment
-  // it called a dispatcher that 0.56 quietly ignores, so the widget reported a
-  // hidden window while Spotify sat in plain view. Now the script re-reads the
-  // workspace and fails if the window is still visible.
-  fs.writeFileSync(path.join(bin, "hyprctl"), `#!/bin/sh
-case "$1" in
-  clients)  echo '[{"class":"Spotify","title":"x","workspace":{"id":1,"name":"1"},"address":"0xabc"}]' ;;
-  dispatch) exit 0 ;;   # accepted, and does nothing, exactly like the old bug
-esac
-`)
-  fs.chmodSync(path.join(bin, "hyprctl"), 0o755)
-
-  let failed = false
-  try {
-    execFileSync("/bin/sh", ["-c", hide], {
-      encoding: "utf8", timeout: 30000, env, stdio: ["ignore", "pipe", "pipe"]
-    })
-  } catch (e) {
-    failed = true
-    assert.ok(String(e.stderr).includes("still on workspace"),
-      "the failure should say the window did not move, got: " + e.stderr)
+  // Valid shell syntax
+  for (const [name, script] of [["start", start], ["show", show], ["minimize", minimize], ["kill", kill]]) {
+    try {
+      execFileSync("/bin/sh", ["-n", script], { encoding: "utf8", timeout: 5000 })
+    } catch (e) {
+      assert.fail(name + " script has invalid shell syntax: " + e.message)
+    }
   }
-  assert.ok(failed, "a dispatch that silently does nothing must not be reported as success")
+}
 
-  // ------------------------------------------------------ a hostile address
-  //
-  // The address is interpolated into a Lua string. It comes from Hyprland, but
-  // it is still checked, because "it is our own compositor" is not a reason to
-  // stop checking.
-  fs.writeFileSync(path.join(bin, "hyprctl"), `#!/bin/sh
-case "$1" in
-  clients) echo '[{"class":"Spotify","workspace":{"id":1,"name":"1"},"address":"0xabc\\"} or os.exit(1) --"}]' ;;
-esac
-`)
-  fs.chmodSync(path.join(bin, "hyprctl"), 0o755)
+// ------------------------------------------------------- install check script
+{
+  const install = M.installCheckScript("~/.config/ncspot/config.toml")
 
-  let refused = false
-  try {
-    execFileSync("/bin/sh", ["-c", hide], {
-      encoding: "utf8", timeout: 30000, env, stdio: ["ignore", "pipe", "pipe"]
-    })
-  } catch (e) {
-    refused = /refusing a window address/.test(String(e.stderr))
-  }
-  assert.ok(refused, "a non-hex address should be refused before it reaches Lua")
+  assert.ok(install.indexOf("command -v ncspot") !== -1)
+  assert.ok(install.indexOf("command -v tmux") !== -1)
+  assert.ok(install.indexOf("NCSPOT yes") !== -1)
+  assert.ok(install.indexOf("NCSPOT no") !== -1)
+  assert.ok(install.indexOf("TMUX yes") !== -1)
+  assert.ok(install.indexOf("TMUX no") !== -1)
+  assert.ok(install.indexOf("CONFIG yes") !== -1)
+  assert.ok(install.indexOf("CONFIG no") !== -1)
 
-  fs.rmSync(box, { recursive: true, force: true })
+  // Valid shell
+  execFileSync("/bin/sh", ["-n", install], { encoding: "utf8", timeout: 5000 })
+}
+
+// ------------------------------------------------------- custom session name
+{
+  const start = M.ncspotStartScript("music")
+  const show = M.ncspotShowScript("music")
+  const minimize = M.ncspotMinimizeScript("music")
+  const kill = M.ncspotKillScript("music")
+
+  assert.ok(start.indexOf("tmux new-session -d -s music ncspot") !== -1)
+  assert.ok(start.indexOf("tmux has-session -t music") !== -1)
+  assert.ok(show.indexOf("tmux attach -t music") !== -1)
+  assert.ok(minimize.indexOf("tmux detach-client -t music") !== -1)
+  assert.ok(kill.indexOf("tmux kill-session -t music") !== -1)
 }
 
 console.log("ok — ops tests passed")

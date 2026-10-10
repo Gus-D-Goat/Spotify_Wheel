@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "id": "io.github.adam-loy.spotify-wheel",
   "name": "Spotify_Wheel",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "author": "Adam-loy",
   "license": "CC0-1.0",
-  "description": "Spotify in the Omarchy bar: always present, with background playback, transport, search, and a panel over the current album cover.",
+  "description": "Spotify in the Omarchy bar: always present, with background playback via ncspot, transport, search, and a panel over the current album cover.",
   "kinds": [
     "bar-widget"
   ],
@@ -14,7 +14,7 @@
   },
   "barWidget": {
     "displayName": "Spotify",
-    "description": "Real-time playing from Spotify, with search, seek, transport, shuffle, repeat and volume over the current album cover.",
+    "description": "Real-time playing from Spotify via ncspot, with search, seek, transport, shuffle, repeat and volume over the current album cover.",
     "category": "Media",
     "aliases": [
       "spotify",
@@ -36,7 +36,10 @@
       "artIntensity": 55,
       "searchKind": "track",
       "releaseGenre": "pop",
-      "startOnLogin": false
+      "startOnLogin": false,
+      "autoQuitMinutes": 15,
+      "tmuxSessionName": "ncspot",
+      "ncspotConfigPath": "~/.config/ncspot/config.toml"
     },
     "schema": [
       {
@@ -64,9 +67,9 @@
       {
         "key": "hideWhenClosed",
         "type": "boolean",
-        "label": "Hide the widget when Spotify is not running",
+        "label": "Hide the widget when ncspot is not running",
         "defaultValue": false,
-        "description": "Off by default, so a dimmed Spotify icon is always in the bar: it searches and it launches the app. Turn this on to hide the slot whenever Spotify is not running."
+        "description": "Off by default, so a dimmed icon is always in the bar: it searches and it launches the player. Turn this on to hide the slot whenever ncspot is not running."
       },
       {
         "key": "searchKind",
@@ -141,9 +144,33 @@
       {
         "key": "startOnLogin",
         "type": "boolean",
-        "label": "Start Spotify at login, hidden",
+        "label": "Start ncspot at login",
         "defaultValue": false,
-        "description": "Start playing a few seconds after login, with the window sent straight to a hidden workspace. The widget becomes the only interface: you never open the Spotify app. Off by default, because it starts a music player on its own."
+        "description": "Start the ncspot tmux session a few seconds after login. The widget becomes the only interface: you never open a GUI. Off by default, because it starts a music player on its own."
+      },
+      {
+        "key": "autoQuitMinutes",
+        "type": "integer",
+        "label": "Auto-quit after pause (minutes)",
+        "min": 1,
+        "max": 120,
+        "step": 1,
+        "defaultValue": 15,
+        "description": "When playback has been paused for this many minutes, ncspot is gracefully quit and its tmux session is killed to save battery."
+      },
+      {
+        "key": "tmuxSessionName",
+        "type": "string",
+        "label": "Tmux session name",
+        "defaultValue": "ncspot",
+        "description": "Name of the tmux session that ncspot runs in. Change this if you run multiple instances or use a custom name."
+      },
+      {
+        "key": "ncspotConfigPath",
+        "type": "string",
+        "label": "ncspot config path",
+        "defaultValue": "~/.config/ncspot/config.toml",
+        "description": "Path to the ncspot configuration file. The plugin checks for this on startup and warns if it is missing."
       }
     ]
   }

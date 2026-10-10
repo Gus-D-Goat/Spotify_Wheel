@@ -7,30 +7,32 @@ const M = require("../Model.js")
 
 // ------------------------------------------------------------ player matching
 {
-  const desktop = { dbusName: "org.mpris.MediaPlayer2.spotify", identity: "Spotify" }
-  const daemon = { dbusName: "org.mpris.MediaPlayer2.spotifyd.instance7", identity: "spotifyd" }
-  const tui = { dbusName: "org.mpris.MediaPlayer2.spotify_player", desktopEntry: "spotify-player" }
+  const ncspot = { dbusName: "org.mpris.MediaPlayer2.ncspot", identity: "ncspot" }
+  const renamed = { dbusName: "org.mpris.MediaPlayer2.ncspot.instance3", identity: "ncspot" }
+  const desktop = { desktopEntry: "ncspot", identity: "ncspot" }
   const firefox = { dbusName: "org.mpris.MediaPlayer2.firefox.instance_1_2", identity: "Mozilla Firefox" }
-  // Not Spotify, but its bus name contains the word.
-  const decoy = { dbusName: "org.mpris.MediaPlayer2.notspotifyatall", identity: "Rhythmbox" }
+  const spotify = { dbusName: "org.mpris.MediaPlayer2.spotify", identity: "Spotify" }
+  const decoy = { dbusName: "org.mpris.MediaPlayer2.notncspotatall", identity: "Rhythmbox" }
 
-  assert.ok(M.isSpotify(desktop))
-  assert.ok(M.isSpotify(daemon))
-  assert.ok(M.isSpotify(tui))
-  assert.ok(!M.isSpotify(firefox))
-  assert.ok(!M.isSpotify(decoy))
-  assert.ok(!M.isSpotify(null))
+  assert.ok(M.isNcspot(ncspot))
+  assert.ok(M.isNcspot(renamed))
+  assert.ok(M.isNcspot(desktop))
+  assert.ok(!M.isNcspot(firefox))
+  assert.ok(!M.isNcspot(spotify))
+  assert.ok(!M.isNcspot(decoy))
+  assert.ok(!M.isNcspot(null))
 
   // A player that is actually making sound wins over one that is merely open,
   // so a forgotten paused instance never hides the live one.
-  const paused = Object.assign({ isPlaying: false }, desktop)
-  const playing = Object.assign({ isPlaying: true }, daemon)
-  assert.strictEqual(M.findSpotify([paused, playing]), playing)
-  assert.strictEqual(M.findSpotify([playing, paused]), playing)
-  assert.strictEqual(M.findSpotify([paused]), paused)
-  assert.strictEqual(M.findSpotify([firefox]), null)
-  assert.strictEqual(M.findSpotify([]), null)
-  assert.strictEqual(M.findSpotify(undefined), null)
+  const paused = Object.assign({ isPlaying: false }, ncspot)
+  const playing = Object.assign({ isPlaying: true }, renamed)
+  assert.strictEqual(M.findNcspot([paused, playing]), playing)
+  assert.strictEqual(M.findNcspot([playing, paused]), playing)
+  assert.strictEqual(M.findNcspot([paused]), paused)
+  assert.strictEqual(M.findNcspot([firefox]), null)
+  assert.strictEqual(M.findNcspot([spotify]), null)
+  assert.strictEqual(M.findNcspot([]), null)
+  assert.strictEqual(M.findNcspot(undefined), null)
 }
 
 // -------------------------------------------------------------- the bar label
@@ -312,6 +314,45 @@ const M = require("../Model.js")
       assert.ok(Math.abs(((a >> shift) & 255) - ((b >> shift) & 255)) <= 1, hex + " -> " + back)
     }
   })
+}
+
+// --------------------------------------------------------- ncspot/tmux scripts
+{
+  const start = M.ncspotStartScript("ncspot")
+  const show = M.ncspotShowScript("ncspot")
+  const minimize = M.ncspotMinimizeScript("ncspot")
+  const kill = M.ncspotKillScript("ncspot")
+  const install = M.installCheckScript("~/.config/ncspot/config.toml")
+
+  // Start: checks for tmux and ncspot, creates detached session
+  assert.ok(start.indexOf("command -v tmux") !== -1)
+  assert.ok(start.indexOf("command -v ncspot") !== -1)
+  assert.ok(start.indexOf("tmux new-session -d -s ncspot ncspot") !== -1)
+  assert.ok(start.indexOf("tmux has-session -t ncspot") !== -1)
+
+  // Show: attaches in terminal
+  assert.ok(show.indexOf("tmux attach -t ncspot") !== -1)
+  assert.ok(show.indexOf("foot") !== -1)
+
+  // Minimize: detaches
+  assert.ok(minimize.indexOf("tmux detach-client -t ncspot") !== -1)
+
+  // Kill: kills session
+  assert.ok(kill.indexOf("tmux kill-session -t ncspot") !== -1)
+
+  // Install check: checks all three
+  assert.ok(install.indexOf("command -v ncspot") !== -1)
+  assert.ok(install.indexOf("command -v tmux") !== -1)
+  assert.ok(install.indexOf("NCSPOT yes") !== -1)
+  assert.ok(install.indexOf("TMUX yes") !== -1)
+  assert.ok(install.indexOf("CONFIG yes") !== -1)
+
+  // No Spotify references remain
+  for (const script of [start, show, minimize, kill]) {
+    assert.ok(script.toLowerCase().indexOf("spotify") === -1, "script should not reference Spotify")
+    assert.ok(script.indexOf("hyprctl") === -1, "script should not reference hyprctl")
+    assert.ok(script.indexOf("special:") === -1, "script should not reference special workspaces")
+  }
 }
 
 console.log("ok — model tests passed")

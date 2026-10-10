@@ -1,30 +1,29 @@
 // Pure helpers for the Spotify bar widget. Kept out of Panel.qml so the QML
 // stays declarative and these stay trivially testable.
 
-// Spotify's own MPRIS bus is org.mpris.MediaPlayer2.spotify, but the same
-// widget should also drive the headless clients people run instead of the
-// desktop app, so match on bus name, desktop entry, and identity.
-function isSpotify(player) {
+// ncspot's MPRIS bus is org.mpris.MediaPlayer2.ncspot. Match on bus name,
+// desktop entry, and identity so a renamed build is still found.
+function isNcspot(player) {
   if (!player) return false
 
   var dbusName = String(player.dbusName || "").toLowerCase()
   var desktopEntry = String(player.desktopEntry || "").toLowerCase()
   var identity = String(player.identity || "").toLowerCase()
 
-  if (dbusName.indexOf("mediaplayer2.spotify") !== -1) return true
-  if (desktopEntry === "spotify" || desktopEntry === "spotifyd" || desktopEntry === "spotify-player") return true
-  return identity === "spotify" || identity === "spotifyd"
+  if (dbusName.indexOf("mediaplayer2.ncspot") !== -1) return true
+  if (desktopEntry === "ncspot") return true
+  return identity === "ncspot"
 }
 
 // A playing client wins over an idle one, so a paused leftover instance never
 // hides the one actually making sound.
-function findSpotify(players) {
+function findNcspot(players) {
   var list = players && players.length !== undefined ? players : []
   var idle = null
 
   for (var i = 0; i < list.length; i++) {
     var p = list[i]
-    if (!isSpotify(p)) continue
+    if (!isNcspot(p)) continue
     if (p.isPlaying) return p
     if (!idle) idle = p
   }
@@ -44,10 +43,10 @@ function barLabel(player, showArtist) {
 }
 
 function tooltipText(player) {
-  if (!player) return "Spotify — not running"
+  if (!player) return "ncspot — not running"
 
   var label = barLabel(player, true)
-  if (!label) return "Spotify"
+  if (!label) return "ncspot"
   return (player.isPlaying ? "" : "Paused — ") + label
 }
 
@@ -90,15 +89,6 @@ function pad(value) {
 // the current cover, not by a second one of their own, so widening it is a
 // deliberate act with a single blast radius.
 var artHosts = ["scdn.co", "dzcdn.net", "mzstatic.com"]
-
-// Where Spotify's window is put when the widget is being the player.
-//
-// A named special workspace, and specifically one of our own rather than the
-// conventional "minimized", so that showing and hiding it can never disturb a
-// scratchpad the user has bound to something of their own. Windows on a special
-// workspace stay mapped and keep playing; they just cannot be landed on by
-// accident.
-var HIDDEN_WORKSPACE = "special:spotify"
 
 function artHostAllowed(host) {
   var name = String(host || "").toLowerCase()
@@ -375,140 +365,94 @@ function parseArtBatch(text) {
 
 // ------------------------------------------------------- desktop operations
 //
-// The two things this widget does to Spotify itself, both as generated scripts
-// so that nothing reaches a command line as code and every path is a literal.
+// The things this widget does to ncspot itself, both as generated scripts so
+// that nothing reaches a command line as code and every path is a literal.
 
-// Starts Spotify and then gets its window out of the way, so the bar widget
-// stays the whole interface and the app is never something you have to look at.
+// Starts ncspot in a detached tmux session. No window, no terminal, no GUI —
+// just the TUI running headless in the background.
 //
-// The two halves have to be one script because of the timing. At the moment
-// Spotify is launched there is no window to move, and it appears a second or
-// two later, so a caller that launched and then immediately asked for the
-// window to be hidden would find nothing and give up. Polling for a short
-// while is what makes "start it hidden" a thing that actually works.
-//
-// `launch` is what the widget's own Launch button and the start-on-login
-// setting use. Passing false hides a window that is already open, which is what
-// the Minimise button wants.
-function spotifyBackgroundScript(launch) {
+// If the session already exists, this is a no-op: ncspot is either still
+// running in it, or the user intentionally closed it and a new session should
+// not be created without being asked.
+function ncspotStartScript(sessionName) {
   return [
     'set -u',
     '',
-    'command -v hyprctl >/dev/null 2>&1 || exit 1',
-    'command -v jq >/dev/null 2>&1 || exit 1',
+    'command -v tmux >/dev/null 2>&1 || exit 1',
+    'command -v ncspot >/dev/null 2>&1 || exit 1',
     '',
-    (launch
-      ? [
-        '# Launched through Omarchy so the desktop entry, and not a bare binary,',
-        '# is what decides how Spotify starts. `setsid` detaches it from this',
-        '# script: otherwise killing this script to tidy up would take the music',
-        '# down with it.',
-        'setsid -f omarchy launch spotify >/dev/null 2>&1 || exit 1'
-      ].join('\n')
-      : '# Already running; only the window needs moving.'),
+    '# Only create the session if it does not already exist. If it exists,',
+    '# ncspot is either running or the user closed it — either way, do',
+    '# nothing.',
+    'tmux has-session -t ' + sessionName + ' 2>/dev/null && exit 0',
     '',
-    '# The window goes to a special workspace. That is a scratchpad you cannot',
-    '# land on by accident: it is not in the workspace list, it does not change',
-    '# what the user is looking at, and the client stays mapped, so playback is',
-    '# untouched. `follow = false` is what keeps the move from yanking the user',
-    '# onto the window we are hiding.',
-    '#',
-    '# Bounded at 30s. A cold start on a slow disk is a few seconds, and a login',
-    '# where Spotify never appears should not leave a spinner in the panel.',
-    'i=0',
-    'while [ "$i" -lt 60 ]; do',
-    '  addr=$(hyprctl clients -j 2>/dev/null | jq -r \'',
-    '    [ .[]',
-    '      | select(((.class // "") | ascii_downcase | test("spotify"))',
-    '           or ((.title // "") | ascii_downcase | test("spotify")))',
-    '      | select(((.workspace // "") | tostring | startswith("special")) | not)',
-    '    ][0].address // empty',
-    '\')',
-    '  if [ -n "${addr:-}" ]; then',
-    '    break',
-    '  fi',
-    '  i=$((i + 1))',
-    '  sleep 0.5',
-    'done',
-    '',
-    'if [ -z "${addr:-}" ]; then',
-    '  # Launched but never appeared. Not worth an error: the panel already has an',
-    '  # idle state for Spotify not running, and it is showing it.',
-    '  exit 0',
-    'fi',
-    '',
-    '# The address goes into a Lua string literal, so it is checked against what',
-    '# Hyprland actually emits rather than trusted. Nothing else is interpolated.',
-    'case "$addr" in',
-    '  0x*[0-9a-fA-F]*) ;;',
-    '  *) echo "refusing a window address that is not hex: $addr" >&2; exit 1 ;;',
-    'esac',
-    'case "$addr" in',
-    '  *[!0-9a-fA-Fx]*) echo "refusing a window address with odd characters" >&2; exit 1 ;;',
-    'esac',
-    '',
-    '# Hyprland 0.55 moved dispatchers behind a Lua layer, and this needs the',
-    '# current form: `hl.dsp.window.move` with the window given as an',
-    '# `address:` selector, dispatched through `hyprctl dispatch` (which wraps it',
-    '# in `hl.dispatch` for you -- wrapping it again is an error). The old',
-    '# string form, `hyprctl dispatch movetoworkspace special:...`, is a no-op on',
-    '# 0.56 and, worse, used to fail silently.',
-    'hyprctl dispatch "hl.dsp.window.move({ window = \\"address:$addr\\", workspace = \\"' + HIDDEN_WORKSPACE + '\\", follow = false })" >/dev/null 2>&1 || exit 1',
-    '',
-    '# Confirm it actually moved. A dispatcher that does nothing still reports',
-    '# success, so believing the exit code here would mean the widget claims to',
-    '# have hidden a window that is sitting in plain view.',
-    'i=0',
-    'while [ "$i" -lt 20 ]; do',
-    '  ws=$(hyprctl clients -j 2>/dev/null | jq -r --arg a "$addr" \'',
-    '    [ .[] | select(((.address // "") | ascii_downcase) == ($a | ascii_downcase))',
-    '         | (.workspace.name // "") ][0] // empty',
-    '\')',
-    '  case "$ws" in',
-    '    special:*) exit 0 ;;',
-    '  esac',
-    '  i=$((i + 1))',
-    '  sleep 0.25',
-    'done',
-    '',
-    'echo "Spotify is still on workspace ${ws:-unknown} after asking for ' + HIDDEN_WORKSPACE + '" >&2',
-    'exit 1'
+    '# Detached: no terminal, no window. ncspot runs headless.',
+    'tmux new-session -d -s ' + sessionName + ' ncspot'
   ].join('\n')
 }
 
-// The way back, for the widget's "Show app" button: take the window off the
-// special workspace and onto whatever the user is looking at, following it so
-// it comes up. This is the only thing in the widget that puts Spotify on screen.
-function spotifyShowScript() {
+// Attaches to the ncspot tmux session in the user's terminal. This is the
+// "Show app" action — the only thing that opens a window for ncspot.
+function ncspotShowScript(sessionName) {
   return [
     'set -u',
     '',
-    'command -v hyprctl >/dev/null 2>&1 || exit 1',
-    'command -v jq >/dev/null 2>&1 || exit 1',
+    'command -v tmux >/dev/null 2>&1 || exit 1',
     '',
-    'addr=$(hyprctl clients -j 2>/dev/null | jq -r \'',
-    '  [ .[]',
-    '    | select(((.class // "") | ascii_downcase | test("spotify"))',
-    '         or ((.title // "") | ascii_downcase | test("spotify")))',
-    '  ][0].address // empty',
-    '\')',
-    'if [ -z "${addr:-}" ]; then exit 0; fi',
+    '# Attach in the system terminal. foot is Omarchy\'s default.',
+    'exec foot -e tmux attach -t ' + sessionName
+  ].join('\n')
+}
+
+// Detaches from the ncspot tmux session. This is the "Minimize" action —
+// closes the terminal window but keeps ncspot running in the background.
+function ncspotMinimizeScript(sessionName) {
+  return [
+    'set -u',
     '',
-    'case "$addr" in',
-    '  0x*[0-9a-fA-F]*) ;;',
-    '  *) echo "refusing a window address that is not hex: $addr" >&2; exit 1 ;;',
-    'esac',
-    'case "$addr" in',
-    '  *[!0-9a-fA-Fx]*) echo "refusing a window address with odd characters" >&2; exit 1 ;;',
-    'esac',
+    'command -v tmux >/dev/null 2>&1 || exit 1',
     '',
-    'ws=$(hyprctl activeworkspace -j 2>/dev/null | jq -r \'.id // empty\')',
-    'case "${ws:-}" in',
-    '  ""|*[!0-9]*) echo "could not read the current workspace" >&2; exit 1 ;;',
-    'esac',
+    '# Detach any client from the session. If no one is attached, this is a',
+    '# no-op (which is fine — there is nothing to minimize).',
+    'tmux detach-client -t ' + sessionName + ' 2>/dev/null || true'
+  ].join('\n')
+}
+
+// Kills the ncspot tmux session entirely. Used by auto-quit and the
+// "Close app" button.
+function ncspotKillScript(sessionName) {
+  return [
+    'set -u',
     '',
-    'hyprctl dispatch "hl.dsp.window.move({ window = \\"address:$addr\\", workspace = ' + '${ws}' + ', follow = true })" >/dev/null 2>&1 || exit 1',
-    'exit 0'
+    'command -v tmux >/dev/null 2>&1 || exit 1',
+    '',
+    'tmux kill-session -t ' + sessionName + ' 2>/dev/null || true'
+  ].join('\n')
+}
+
+// Checks whether ncspot and tmux are installed and whether the ncspot config
+// file exists. Outputs three lines: NCSPOT, TMUX, CONFIG — each "yes" or "no".
+function installCheckScript(configPath) {
+  return [
+    'set -u',
+    '',
+    'if command -v ncspot >/dev/null 2>&1; then',
+    '  echo "NCSPOT yes"',
+    'else',
+    '  echo "NCSPOT no"',
+    'fi',
+    '',
+    'if command -v tmux >/dev/null 2>&1; then',
+    '  echo "TMUX yes"',
+    'else',
+    '  echo "TMUX no"',
+    'fi',
+    '',
+    'if [ -f ' + configPath + ' ]; then',
+    '  echo "CONFIG yes"',
+    'else',
+    '  echo "CONFIG no"',
+    'fi'
   ].join('\n')
 }
 
@@ -710,8 +654,8 @@ function clamp(value, low, high) {
 // this block.
 if (typeof module !== "undefined") {
   module.exports = {
-    isSpotify: isSpotify,
-    findSpotify: findSpotify,
+    isNcspot: isNcspot,
+    findNcspot: findNcspot,
     barLabel: barLabel,
     tooltipText: tooltipText,
     formatTime: formatTime,
@@ -720,9 +664,11 @@ if (typeof module !== "undefined") {
     artProbeScript: artProbeScript,
     artBatchScript: artBatchScript,
     parseArtBatch: parseArtBatch,
-    spotifyBackgroundScript: spotifyBackgroundScript,
-    spotifyShowScript: spotifyShowScript,
-    hiddenWorkspace: HIDDEN_WORKSPACE,
+    ncspotStartScript: ncspotStartScript,
+    ncspotShowScript: ncspotShowScript,
+    ncspotMinimizeScript: ncspotMinimizeScript,
+    ncspotKillScript: ncspotKillScript,
+    installCheckScript: installCheckScript,
     parseArtProbe: parseArtProbe,
     fileUrl: fileUrl,
     pickDominant: pickDominant,

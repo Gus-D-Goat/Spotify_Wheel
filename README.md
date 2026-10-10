@@ -1,8 +1,9 @@
 # Spotify_Wheel
 
-A Spotify widget for the [Omarchy](https://omarchy.dev) bar. It stays in the bar
-whether or not Spotify is running, adds search and a new releases tab, and has a
-button for keeping the music playing with no window in the way.
+A Spotify widget for the [Omarchy](https://omarchy.dev) bar. It runs on
+**ncspot** — a lightweight Rust TUI client — instead of the Electron desktop app,
+so it sips battery instead of draining it. Search, new releases, and a panel
+over the current album cover are all included.
 
 ![The widget in the bar, and its panel open over the current album cover](preview.jpg)
 
@@ -70,42 +71,34 @@ folder; the artwork cache is left alone and is safe to delete.
 
 ## What is different from upstream
 
-- **Always in the bar.** Upstream hides the slot when Spotify is closed. This
-  one keeps a dimmed `Spotify` label and the icon there, so it is a way to start
-  the app and search without hunting for it. The setting still exists if you
-  would rather it got out of the way.
+- **Runs on ncspot, not the Electron app.** The widget drives
+  [ncspot](https://github.com/hrkfdn/ncspot) — a Rust TUI Spotify client — in a
+  detached tmux session. No Electron, no GUI, no battery drain. See
+  [Background playback](#background-playback).
+- **Always in the bar.** Upstream hides the slot when the player is closed. This
+  one keeps a dimmed label and the icon there, so it is a way to start the player
+  and search without hunting for it. The setting still exists if you would
+  rather it got out of the way.
 - **Search and new releases**, in two extra tabs. Spotify's own Web API is not
   used at all — see [Where the data comes from](#where-the-data-comes-from).
-- **Start / Show app**, which runs Spotify with no window at all. See
+- **Start / Show app**, which starts ncspot with no window at all. See
   [Background playback](#background-playback).
-- **Close app**, which quits Spotify and stops the music.
+- **Close app**, which quits ncspot and stops the music.
+- **Auto-quit.** When playback pauses for a configurable number of minutes,
+  ncspot is gracefully quit and its tmux session is killed to save battery.
 
-## No Premium, and no Spotify API
+## Requires Spotify Premium
 
-Everything here works on a free Spotify account. Two things follow from that,
-and they shape the whole design.
-
-**The Spotify Web API is off limits.** Since February 2026 it requires a Premium
-app owner, and `/browse/new-releases` is gone. So there is no "current
-playback", no "your library", and no official new releases feed. What the widget
-shows on screen still comes from Spotify over MPRIS, which needs no account and
-no key. Only *discovery* — search and new releases — has to come from elsewhere.
-
-**`spotifyd` is not used.** It would be the proper way to run Spotify as a
-headless player, but it needs Premium, and a free account cannot use it.
-
-### Opening a result
-
-Because there is no API, a catalogue hit cannot be turned into a Spotify track
-by ID. Clicking a result hands Spotify a `spotify:search:` URI for that title
-and artist through MPRIS, which opens the search inside the app. It is a
-handoff, not playback.
+ncspot authenticates through Spotify's Web API, which requires a Premium
+account. A free account cannot use it. This is a change from earlier versions
+of this widget, which ran the official Spotify desktop app and worked on free
+accounts.
 
 ## Where the data comes from
 
 | Tab | Source | Notes |
 | --- | --- | --- |
-| Now playing | Spotify, over MPRIS | No key, no account, no network |
+| Now playing | ncspot, over MPRIS | No key, no account, no network |
 | Search, tracks | [Deezer](https://www.deezer.com) | Public JSON, no auth |
 | Search, albums | [Deezer](https://www.deezer.com) | Public JSON, no auth |
 | New releases | [Apple's search API](https://performance-partners.apple.com/search-api) | Public JSON, no auth |
@@ -131,34 +124,20 @@ have been a better source, now answer empty.
 
 ## Background playback
 
-The point of the widget is that you can listen to Spotify without ever seeing
-Spotify. **Start** launches it and puts its window on a Hyprland *special
-workspace*, so playback begins and the window is somewhere you cannot land on
-by accident. **Show app** takes it back off and puts it on whatever workspace
-you are looking at, following it there.
+The point of the widget is that you can listen to Spotify without ever seeing a
+Spotify window. **Start** launches ncspot in a detached tmux session — no
+window, no terminal, nothing on screen. **Show app** opens your terminal and
+attaches to the tmux session so you can peek at the ncspot TUI. **Minimize**
+detaches again.
 
-The special workspace is `special:spotify` rather than the conventional
-`special:minimized`, specifically so that toggling it cannot disturb a scratchpad
-you have bound to something of your own.
+The tmux session name defaults to `ncspot` and is configurable. ncspot runs
+headless in the background; the bar widget is the only interface you need.
 
-**This is not a daemon.** On a free account there is no supported way to run
-Spotify without its window: `spotifyd` needs Premium, as does Spotify's own
-Soloist client. So the process is real, the window is just somewhere you are
-not. If you want no process at all, that needs Premium.
+**Auto-quit** is the battery-saving half: when playback has been paused for
+`autoQuitMinutes` (default 15), the widget gracefully quits ncspot via MPRIS
+and kills the tmux session. Press play again and ncspot starts fresh.
 
-Two details are worth knowing if you read `Model.js`:
-
-- Hyprland 0.55 moved dispatchers behind a Lua layer, so this needs
-  `hyprctl dispatch 'hl.dsp.window.move({ window = "address:0x…", workspace =
-  "special:spotify", follow = false })'`. The old string form,
-  `hyprctl dispatch movetoworkspace special:…`, is accepted and does nothing on
-  0.56. Note that `hyprctl dispatch` wraps the expression in `hl.dispatch` for
-  you; wrapping it again is an error.
-- Because of exactly that, a successful exit code means nothing. The script
-  re-reads the window's workspace afterwards and exits non-zero if it did not
-  move, so a silent no-op cannot be reported to the panel as success.
-
-`startOnLogin` does the same thing a few seconds after login. It is off by
+`startOnLogin` starts the tmux session a few seconds after login. It is off by
 default, because starting a music player unprompted is not a default anyone
 would want.
 
@@ -168,11 +147,11 @@ would want.
 rather than killing the process: only the player knows whether it is willing to
 quit, and a kill mid-write would leave the next start slower.
 
-That makes it deliberately unlike **Start**. Minimising — moving the window to
-`special:spotify` — is the everyday way to get Spotify out of the way while it
-keeps playing. This ends it.
+That makes it deliberately unlike **Start**. Minimising — detaching from the
+tmux session — is the everyday way to get ncspot out of the way while it keeps
+playing. This ends it.
 
-The button is disabled when Spotify is not running, and when the player reports
+The button is disabled when ncspot is not running, and when the player reports
 `canQuit` as false, so it never looks like it worked when it did not.
 
 ## Artwork
@@ -185,13 +164,24 @@ downloads it to a local file with ImageMagick. The panel only ever loads a
 body cannot reach the image loader — `evilscdn.co` and `dzcdn.net.evil.com`
 are both refused.
 
+## Requirements
+
+- `ncspot` — the Spotify TUI client. Must be installed and configured with
+  your Premium credentials at `~/.config/ncspot/config.toml`.
+- `tmux` — runs ncspot in a detached session.
+- `foot` — the terminal used by **Show app** to attach to the tmux session.
+  Omarchy's default terminal.
+- `curl` — the only hard one; search and releases do nothing without it.
+- `ImageMagick` (`magick`) — album art and the cover backdrop. Without it the
+  panel keeps its plain background and rows show no thumbnails.
+
 ## Settings
 
 In the bar's settings panel, under Spotify:
 
 | Setting | Default | |
 | --- | --- | --- |
-| Hide the widget when Spotify is not running | off | Turn on to hide the slot entirely |
+| Hide the widget when ncspot is not running | off | Turn on to hide the slot entirely |
 | Search shows | Tracks | Or Albums |
 | New releases starts on | pop | The genre the New tab asks for |
 | Maximum label width | 200 | Wider titles scroll |
@@ -202,6 +192,10 @@ In the bar's settings panel, under Spotify:
 | Accent color | Spotify green | Or album art, theme accent, bar foreground |
 | Album cover behind the panel | on | |
 | How much cover shows through | 55 | |
+| Start ncspot at login | off | Starts the tmux session after login |
+| Auto-quit after pause (minutes) | 15 | Gracefully quit ncspot and kill tmux |
+| Tmux session name | ncspot | Change if you run multiple instances |
+| ncspot config path | ~/.config/ncspot/config.toml | Must exist with credentials |
 
 ## IPC
 
@@ -212,33 +206,25 @@ omarchy-shell Spotify_Wheel toggle
 omarchy-shell Spotify_Wheel playPause
 omarchy-shell Spotify_Wheel next
 omarchy-shell Spotify_Wheel previous
-omarchy-shell Spotify_Wheel launch     # start, and hide the window
-omarchy-shell Spotify_Wheel show       # bring the window back
-omarchy-shell Spotify_Wheel minimize   # hide an already-open window
-omarchy-shell Spotify_Wheel quit       # quit Spotify, stopping playback
+omarchy-shell Spotify_Wheel launch     # start ncspot in tmux
+omarchy-shell Spotify_Wheel show       # attach to tmux in terminal
+omarchy-shell Spotify_Wheel minimize   # detach from tmux
+omarchy-shell Spotify_Wheel quit       # quit ncspot, stopping playback
 omarchy-shell Spotify_Wheel search 'daft punk'
 omarchy-shell Spotify_Wheel releases 'hip hop'
 omarchy-shell Spotify_Wheel status
+omarchy-shell Spotify_Wheel checkInstall
 ```
 
 `status` and `searchDebug` return JSON for debugging.
-
-## Requirements
-
-- `curl` — the only hard one; search and releases do nothing without it.
-- `ImageMagick` (`magick`) — album art and the cover backdrop. Without it the
-  panel keeps its plain background and rows show no thumbnails.
-- `jq` — the background-playback buttons.
-- `hyprctl` — the background-playback buttons, on Hyprland 0.55 or newer for
-  the Lua dispatcher form.
 
 ## Tests
 
 ```sh
 node test/qml-test.js       # Panel.qml structure -- see below
-node test/model-test.js     # MPRIS helpers, artwork probe, cache parsing
+node test/model-test.js     # MPRIS helpers, artwork probe, ncspot scripts
 node test/search-test.js    # URLs, both parsers, host vetting, live catalogues
-node test/ops-test.js       # background playback, cache clearing on a fake profile
+node test/ops-test.js       # ncspot/tmux scripts, install checks
 sh   test/probe-test.sh     # the artwork gate, against hostile URLs
 
 sh   test/run.sh            # all of the above
